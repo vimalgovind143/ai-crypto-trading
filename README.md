@@ -66,6 +66,7 @@ This project is currently in the architecture and planning phase. See the develo
 - [Database Schema](docs/database_schema.md) - Complete data model design
 - [Deployment Guide](docs/deployment.md) - Production deployment instructions
 - [Project Structure](project_structure.md) - Directory organization
+- [Feature Implementation Plan](docs/feature_implementation_plan.md) - AI-ready development breakdown
 - [Final Documentation Index](FINAL_PROJECT_DOCUMENTATION.md) - Documentation overview
 
 ## 🚦 Getting Started
