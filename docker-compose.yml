@@ -1,0 +1,221 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: ai-trading-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ai_trading}
+      POSTGRES_USER: ${POSTGRES_USER:-trading_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_database.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./scripts/create_hypertables.sql:/docker-entrypoint-initdb.d/02_hypertables.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trading_user} -d ${POSTGRES_DB:-ai_trading}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - ai-trading-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-trading-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password_123} --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - ai-trading-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-trading-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-ai_trading}
+      - POSTGRES_USER=${POSTGRES_USER:-trading_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password_123}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_123}
+      - SECRET_KEY=${SECRET_KEY:-your_super_secret_key_here}
+      - JWT_SECRET=${JWT_SECRET:-jwt_secret_key_here}
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_SECRET_KEY=${BINANCE_SECRET_KEY}
+      - BINANCE_TESTNET=${BINANCE_TESTNET:-true}
+      - DEBUG=${DEBUG:-true}
+      - ENVIRONMENT=development
+    volumes:
+      - ./backend:/app
+      - ./data/models:/app/data/models
+      - ./data/logs:/app/logs
+      - ./certs:/app/certs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - ai-trading-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-trading-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000/ws
+      - NODE_ENV=development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ai-trading-network
+
+  # ML Training Service (Optional - for model training)
+  ml-trainer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.ml
+    container_name: ai-trading-ml-trainer
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-ai_trading}
+      - POSTGRES_USER=${POSTGRES_USER:-trading_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password_123}
+      - ML_MODEL_PATH=/app/data/models
+      - ML_TRAINING_DATA_PATH=/app/data/training
+    volumes:
+      - ./backend:/app
+      - ./data/models:/app/data/models
+      - ./data/training:/app/data/training
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    profiles:
+      - ml-training
+    networks:
+      - ai-trading-network
+
+  # Celery Worker for Background Tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-trading-celery-worker
+    command: celery -A app.celery_app worker --loglevel=info
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-ai_trading}
+      - POSTGRES_USER=${POSTGRES_USER:-trading_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password_123}
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_123}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redis_password_123}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redis_password_123}@redis:6379/2
+    volumes:
+      - ./backend:/app
+      - ./data/models:/app/data/models
+      - ./data/logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ai-trading-network
+
+  # Celery Beat for Scheduled Tasks
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-trading-celery-beat
+    command: celery -A app.celery_app beat --loglevel=info
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-ai_trading}
+      - POSTGRES_USER=${POSTGRES_USER:-trading_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password_123}
+      - REDIS_HOST=redis
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis_password_123}
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-redis_password_123}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-redis_password_123}@redis:6379/2
+    volumes:
+      - ./backend:/app
+      - ./data/logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ai-trading-network
+
+  # Nginx Reverse Proxy (Optional for production-like setup)
+  nginx:
+    image: nginx:alpine
+    container_name: ai-trading-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./certs:/etc/nginx/certs
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    profiles:
+      - production
+    networks:
+      - ai-trading-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  ai-trading-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
